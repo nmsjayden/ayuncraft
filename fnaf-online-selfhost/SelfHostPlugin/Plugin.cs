@@ -16,6 +16,7 @@ using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using Il2CppList = Il2CppSystem.Collections.Generic.List<Unity.Services.Relay.Models.RelayServerEndpoint>;
 using Unity.Services.Authentication;
 using Unity.Services.Core;
+using Unity.Services.Vivox;
 using UnityEngine;
 using Il2Task = Il2CppSystem.Threading.Tasks.Task;
 using Il2BoolTask = Il2CppSystem.Threading.Tasks.Task<bool>;
@@ -29,7 +30,7 @@ namespace FnafSelfHost
     ///  * The room-code box also accepts a plain IP / host name (optionally ":port").
     ///  * Optionally switches off every Unity online service so the game works while the developer's servers are down.
     /// </summary>
-    [BepInPlugin("local.fnafonline.selfhost", "FNAF Online Self-Host", "0.3.0")]
+    [BepInPlugin("local.fnafonline.selfhost", "FNAF Online Self-Host", "0.3.1")]
     public class Plugin : BasePlugin
     {
         internal static ManualLogSource Log;
@@ -378,5 +379,15 @@ namespace FnafSelfHost
         [HarmonyPatch(typeof(VivoxManager), "SwitchToLobbyChat")] [HarmonyPrefix] private static bool V6() => false;
         [HarmonyPatch(typeof(VivoxManager), "SwitchToGameChat")] [HarmonyPrefix] private static bool V7() => false;
         [HarmonyPatch(typeof(VivoxManager), "SwitchToPrivateChat")] [HarmonyPrefix] private static bool V8() => false;
+
+        // Same thing one level down, in Unity's Vivox SDK, in case the game calls it from somewhere it inlined its own wrappers.
+        [HarmonyPatch(typeof(VivoxServiceInternal), "InitializeAsync")] [HarmonyPrefix] private static bool X1(ref Il2Task __result) { __result = Il2Task.CompletedTask; return false; }
+        [HarmonyPatch(typeof(VivoxServiceInternal), "LoginAsync")] [HarmonyPrefix] private static bool X2(ref Il2Task __result) { __result = Il2Task.CompletedTask; return false; }
+        [HarmonyPatch(typeof(VivoxServiceInternal), "LogoutAsync")] [HarmonyPrefix] private static bool X3(ref Il2Task __result) { __result = Il2Task.CompletedTask; return false; }
+        [HarmonyPatch(typeof(VivoxServiceInternal), "JoinGroupChannelAsync")] [HarmonyPrefix] private static bool X4(ref Il2Task __result) { __result = Il2Task.CompletedTask; return false; }
+        [HarmonyPatch(typeof(VivoxServiceInternal), "JoinEchoChannelAsync")] [HarmonyPrefix] private static bool X5(ref Il2Task __result) { __result = Il2Task.CompletedTask; return false; }
+        [HarmonyPatch(typeof(VivoxServiceInternal), "LeaveAllChannelsAsync")] [HarmonyPrefix] private static bool X6(ref Il2Task __result) { __result = Il2Task.CompletedTask; return false; }
+        [HarmonyPatch(typeof(VivoxServiceInternal), "LeaveChannelAsync")] [HarmonyPrefix] private static bool X7(ref Il2Task __result) { __result = Il2Task.CompletedTask; return false; }
+        [HarmonyPatch(typeof(VivoxServiceInternal), "SetChannelTransmissionModeAsync")] [HarmonyPrefix] private static bool X8(ref Il2Task __result) { __result = Il2Task.CompletedTask; return false; }
     }
 }

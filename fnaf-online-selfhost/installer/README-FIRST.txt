@@ -8,6 +8,13 @@ INSTALL (everyone, once)
      The FIRST start shows a black console window for 1-3 minutes while the mod gets ready. Wait for the game.
      If Windows Firewall asks, click "Allow".
 
+HOW TO TELL IT'S WORKING
+  - When you start the game a BLACK CONSOLE WINDOW opens first. If you never see it, the mod is not
+    running (the game is the plain original) - the install didn't go into the right folder, or antivirus
+    removed winhttp.dll. Run Install.bat again from inside the game folder and read what it prints.
+  - After the game starts, the file  BepInEx\LogOutput.log  should contain the line
+    "Self-host mod loaded". If that file doesn't exist, the mod never started.
+
 HOST  (no setup)
   - Go to the online menu and create a lobby like normal.
   - The mod finds your public IP, opens the port on your router (UPnP), and copies your room code to the
