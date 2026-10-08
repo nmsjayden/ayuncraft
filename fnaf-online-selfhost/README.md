@@ -3,8 +3,9 @@
 Lets you host FNAF Online Multiplayer **from your own PC with no setup**, hand friends a normal room code (or just your IP),
 and keeps working while the developer's servers are down. Built for game version **0.9.6-alpha** (Unity 6000.0.24f1).
 
-The ready-to-use pack for players is a single zip (`FNAF-Online-SelfHost-Pack.zip`: BepInEx + this plugin). Players copy it
-into the game folder and run the game; the steps are in the pack's `README-FIRST.txt`. This repo folder is the source.
+Players get a small zip (`FNAF-Online-SelfHost-Mod.zip`, built from `installer/` + the compiled plugin): they unzip it into the
+game folder and double-click `Install.bat`, which downloads BepInEx (the mod loader) from its official build server and copies
+the mod in. Steps for players are in `installer/README-FIRST.txt`. This folder is the source.
 
 > **Status:** the plugin compiles against the game's real generated interop assemblies and every patch target was checked to exist
 > with matching parameter names. It has **not been run inside the game** (no Windows/GPU where it was written), so expect
@@ -25,6 +26,7 @@ into the game folder and run the game; the steps are in the pack's `README-FIRST
 - `SelfHostPlugin/Plugin.cs` – config, host/join/UI patches, offline-services patches
 - `SelfHostPlugin/AddressCode.cs` – room code ⇄ IP:port
 - `SelfHostPlugin/HostNetwork.cs` – public-IP lookup and UPnP port mapping
+- `installer/` – `Install.bat`, `install.ps1`, `README-FIRST.txt` that go in the zip next to a `mod/BepInEx/...` folder
 - `tools/InteropGen` + `tools/build-pack.md` – regenerate interop and rebuild the pack for a new game version
 
 ## Config (`BepInEx/config/local.fnafonline.selfhost.cfg`)
