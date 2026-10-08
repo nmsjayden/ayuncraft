@@ -10,6 +10,7 @@ using TMPro;
 using Unity.Netcode;
 using Unity.Netcode.Transports.UTP;
 using Unity.Services.Authentication;
+using Unity.Services.Core;
 using UnityEngine;
 using Il2Task = Il2CppSystem.Threading.Tasks.Task;
 using Il2BoolTask = Il2CppSystem.Threading.Tasks.Task<bool>;
@@ -23,7 +24,7 @@ namespace FnafSelfHost
     ///  * The room-code box also accepts a plain IP / host name (optionally ":port").
     ///  * Optionally switches off every Unity online service so the game works while the developer's servers are down.
     /// </summary>
-    [BepInPlugin("local.fnafonline.selfhost", "FNAF Online Self-Host", "0.2.0")]
+    [BepInPlugin("local.fnafonline.selfhost", "FNAF Online Self-Host", "0.2.1")]
     public class Plugin : BasePlugin
     {
         internal static ManualLogSource Log;
@@ -168,7 +169,7 @@ namespace FnafSelfHost
                 {
                     version = Application.version,
                     playerName = MultiplayerManager.Instance.playerName,
-                    String2 = OfflinePatches.LocalPlayerId(),
+                    String2 = Plugin.OfflineServices.Value ? OfflinePatches.LocalPlayerId() : (AuthenticationService.Instance.PlayerId ?? OfflinePatches.LocalPlayerId()),
                 };
                 nm.NetworkConfig.ConnectionData = System.Text.Encoding.UTF8.GetBytes(JsonUtility.ToJson(payload));
 
@@ -218,7 +219,10 @@ namespace FnafSelfHost
         }
     }
 
-    /// <summary>Fires the "services ready" event the main menu is waiting for, a moment after the menu has subscribed to it.</summary>
+    /// <summary>
+    /// Waits until Unity Services have initialised locally (no internet needed), then fires the "services ready" event
+    /// the main menu is waiting for. Gives up waiting after 8 seconds and fires anyway.
+    /// </summary>
     public class ServicesKicker : MonoBehaviour
     {
         public ServicesKicker(IntPtr ptr) : base(ptr) { }
@@ -226,11 +230,12 @@ namespace FnafSelfHost
         private void Update()
         {
             _t += Time.unscaledDeltaTime;
-            if (_t < 0.75f) return;
+            bool ready = UnityServices.State == ServicesInitializationState.Initialized;
+            if (_t < 0.75f || (!ready && _t < 8f)) return;
             var si = ServicesInitialiser.Instance;
             si.areServicesInitialised = true;
             si.OnConnectionToServicesCompleted?.Invoke();
-            Plugin.Log.LogInfo("Offline mode: reported Unity services as ready.");
+            Plugin.Log.LogInfo($"Offline mode: Unity services state = {UnityServices.State}; reported ready after {_t:0.0}s.");
             Destroy(this);
         }
     }
@@ -242,16 +247,10 @@ namespace FnafSelfHost
     internal static class OfflinePatches
     {
         private static string _id;
+        /// <summary>A stable per-install player id (used instead of a Unity login id).</summary>
         internal static string LocalPlayerId()
         {
             if (_id != null) return _id;
-            try
-            {
-                var online = AuthenticationService.Instance.PlayerId;
-                if (!string.IsNullOrEmpty(online)) return _id = online;
-            }
-            catch { /* not signed in */ }
-            // Stable per-install id so a player keeps the same identity between sessions.
             const string key = "FnafSelfHostPlayerId";
             var saved = PlayerPrefs.GetString(key, "");
             if (string.IsNullOrEmpty(saved)) { saved = Guid.NewGuid().ToString("N"); PlayerPrefs.SetString(key, saved); PlayerPrefs.Save(); }
@@ -263,8 +262,20 @@ namespace FnafSelfHost
         [HarmonyPrefix]
         private static bool ServicesStart(ServicesInitialiser __instance)
         {
+            // Initialise Unity Services *locally* (needs no internet). Without this every `XxxService.Instance` throws
+            // "Singleton is not initialized" each time the game touches it. We just never sign in.
+            try { UnityServices.InitializeAsync(); }
+            catch (Exception e) { Plugin.Log.LogWarning($"UnityServices.InitializeAsync failed: {e.Message}"); }
             __instance.gameObject.AddComponent<ServicesKicker>();
             return false;
+        }
+
+        // Not signed in, so the player id is empty - and the game turns it into a string without a null check.
+        [HarmonyPatch(typeof(AuthenticationServiceInternal), "get_PlayerId")]
+        [HarmonyPostfix]
+        private static void PlayerId_Postfix(ref string __result)
+        {
+            if (string.IsNullOrEmpty(__result)) __result = LocalPlayerId();
         }
 
         // --- host asks Cloud Code "is this player a developer / moderator?" for every joiner -----------------------
@@ -299,6 +310,9 @@ namespace FnafSelfHost
         [HarmonyPatch(typeof(LobbyManager), "LeaveLobby")] [HarmonyPrefix] private static bool L4() => false;
         [HarmonyPatch(typeof(LobbyManager), "UpdateLobbyData")] [HarmonyPrefix] private static bool L5() => false;
         [HarmonyPatch(typeof(LobbyManager), "HandleHeartBeat")] [HarmonyPrefix] private static bool L6() => false;
+        [HarmonyPatch(typeof(LobbyManager), "Update")] [HarmonyPrefix] private static bool L8() => false;
+        [HarmonyPatch(typeof(LobbyManager), "IsLobbyHost")] [HarmonyPrefix] private static bool L9(ref bool __result) { __result = false; return false; }
+        [HarmonyPatch(typeof(MatchmakingUI), "HandlePeriodicListLobbies")] [HarmonyPrefix] private static bool L10() => false;
         [HarmonyPatch(typeof(LobbyManager), "RefreshLobbyList")]
         [HarmonyPrefix]
         private static bool L7(ref Il2Task __result) { __result = Il2Task.CompletedTask; return false; }
