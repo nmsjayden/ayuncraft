@@ -1,79 +1,50 @@
-# FNAF Online – self-host mod (direct connect)
+# FNAF Online – self-host mod
 
-A small [BepInEx](https://github.com/BepInEx/BepInEx) plugin that replaces the game's **Unity Relay** transport with a
-plain direct UDP connection, so one player's PC acts as the server and friends join its IP.
-It ships **no game files** – everyone downloads the original build from GameJolt and drops this plugin in.
+Lets you host FNAF Online Multiplayer **from your own PC with no setup**, hand friends a normal room code (or just your IP),
+and keeps working while the developer's servers are down. Built for game version **0.9.6-alpha** (Unity 6000.0.24f1).
 
-> **Status: written from a static analysis of the 0.9.6-alpha build, never compiled or run.** Offline mode in particular stubs about 20 methods I could only read signatures and call lists for.
-> Expect to fix a compile error or two and to iterate on the first run (see *If it doesn't work*).
-> It only supports build **0.9.6-alpha** (Unity 6000.0.24f1). Method names/signatures come from the IL2CPP metadata dump.
+The ready-to-use pack for players is a single zip (`FNAF-Online-SelfHost-Pack.zip`: BepInEx + this plugin). Players copy it
+into the game folder and run the game; the steps are in the pack's `README-FIRST.txt`. This repo folder is the source.
 
-## What it changes (and what it doesn't)
+> **Status:** the plugin compiles against the game's real generated interop assemblies and every patch target was checked to exist
+> with matching parameter names. It has **not been run inside the game** (no Windows/GPU where it was written), so expect
+> to send back `BepInEx/LogOutput.log` after a first try.
+
+## What it does
 
 | Piece | Behaviour |
 |---|---|
-| Game traffic (Netcode for GameObjects) | **Direct UDP** to the host (`RelayManager.CreateRelayAsync` / `JoinRelayAsync` replaced) |
-| Unity login, Cloud Code, Lobby list, Vivox voice | **Switched off** by default (`OfflineServices = true`). This is what removes the *"no online connection"* screen. Nobody needs the developer's Unity services or even internet access to Unity |
-| In-game voice chat | **Does not work** in offline mode (it is Vivox). Use Discord for voice |
-| Lobby browser | Doesn't list your game; friends join by code (see below) |
-| Developer / moderator checks | Always "no" (they were Cloud Code calls) |
-| Dedicated server | **None exists.** The "server" is a player running Host. A headless build isn't possible without the source |
+| Game traffic | Direct UDP to the host (replaces `RelayManager.CreateRelayAsync` / `JoinRelayAsync`) |
+| Hosting | Click host as normal. The mod finds your public IP, opens UDP 7777 with **UPnP**, and copies your **room code** to the clipboard |
+| Room code | Your address packed into 10 characters, e.g. `6B01R-GJ7K1` (`AddressCode.cs`) |
+| Joining | Room-code box accepts that code, or an IP / `ip:port` / host name (the 6-character limit is lifted) |
+| Online services | `OfflineServices = true` (default) skips Unity login, Cloud Code, Lobby and Vivox so the game works while the developer's servers are down. No voice chat, no public lobby list |
 
-## 1. Install BepInEx (everyone, once)
+## Files
 
-1. Download **BepInEx 6 IL2CPP, Windows x64, a recent *bleeding edge* build** (Unity 6 needs a recent one) from <https://builds.bepinex.dev/projects/bepinex_be>.
-2. Unzip it into the game folder (next to `FNAF Online Multiplayer.exe`).
-3. Launch the game once and quit. BepInEx generates `BepInEx/interop/*.dll` (can take a few minutes the first time).
+- `SelfHostPlugin/Plugin.cs` – config, host/join/UI patches, offline-services patches
+- `SelfHostPlugin/AddressCode.cs` – room code ⇄ IP:port
+- `SelfHostPlugin/HostNetwork.cs` – public-IP lookup and UPnP port mapping
+- `tools/InteropGen` + `tools/build-pack.md` – regenerate interop and rebuild the pack for a new game version
 
-## 2. Build the plugin (one person, once)
+## Config (`BepInEx/config/local.fnafonline.selfhost.cfg`)
 
-Requires the [.NET SDK 6+](https://dotnet.microsoft.com/download).
-
-```
-cd SelfHostPlugin
-dotnet build -c Release -p:GameDir="C:\path\to\fnaf-online-0.9.6-alpha"
-```
-
-Send `bin/Release/net6.0/FnafSelfHost.dll` to your friends. Everyone puts it in `<game folder>/BepInEx/plugins/`.
-
-## 3. Configure (everyone)
-
-Launch once; this creates `BepInEx/config/local.fnafonline.selfhost.cfg`.
-
-| Setting | Host | Friends |
+| Key | Default | Meaning |
 |---|---|---|
-| `Port` | UDP port to listen on (default 7777) | same value |
-| `RoomCode` | any 6 chars, e.g. `K7Q2ZP` | **same** value |
-| `OfflineServices` | `true` (default) | `true` (default) |
-| `ServerAddress` | ignored | the host's public IP / VPN IP / hostname |
-
-## 4. Make the host reachable
-
-Pick one:
-- **Port-forward** UDP `7777` on the host's router to the host PC (and allow it in Windows Firewall).
-- **Tailscale / ZeroTier** – everyone joins the same virtual network; friends use the host's VPN IP. No port-forwarding needed.
-- **playit.gg** (UDP tunnel) – use the tunnel address/port it gives you.
-
-Host on a cloud VPS: the game is a graphical Windows client, so it needs a Windows VM (with a GPU or a software renderer); it will not run headless.
-
-## 5. Play
-
-- Host: normal flow – create a lobby. The plugin logs `Hosting directly on UDP 7777` in `BepInEx/LogOutput.log`.
-- Friends: choose join-by-code and enter the same `RoomCode`. The plugin ignores the code's value for routing and connects to `ServerAddress:Port`.
-  (If the code box accepts it, you can type `ip:port` instead.)
+| `General.Port` | 7777 | UDP port (same for everyone) |
+| `General.OfflineServices` | true | Skip Unity online services |
+| `Host.PublicAddress` | empty | Only for VPN/tunnel hosting (Tailscale IP, `name.joinmc.link:12345`) |
+| `Host.TryUpnp` | true | Auto-open the router port |
 
 ## If it doesn't work
 
-Send me `BepInEx/LogOutput.log`. Likely first-run issues:
-- **Still stuck on the "no online connection" screen** – look for `Offline mode: reported Unity services as ready.` in the log. If missing, the `ServicesInitialiser.Start` patch didn't apply or the menu subscribed after the event fired (I'd change the 0.75s delay).
-- **Host creates a lobby but nothing happens / UI hangs** – `LobbyManager.CreateLobby` was replaced by a version that only calls `HostOnlineRoomAsync`; the original also set some state I can't see. The log will show the exception.
-- **Joining fails with the voice or ID fields** – the client sends a voice-chat id and auth id to the host; offline these are empty or generated and the game may not tolerate it.
-- **Compile errors** – interop names differ slightly (private fields like `RelayManager.joinCode`, `ConnectionPayload` boxing). Easy to adjust.
-- **Code box rejects `RoomCode`** – the game's `MultiplayerManager.IsCodeValid()` may check length/charset; I'd patch it.
-- **"Version mismatch" / kicked on join** – the connection payload (`version`, `playerName`, `String2`=auth id) must match what the host's `JoinRoomApprovalAsync` expects; I'd compare against it.
-- **Game updates** – a new GameJolt version changes the metadata; the patch targets must be re-checked.
+Send `BepInEx/LogOutput.log`. Things most likely to need a tweak:
+- Stuck on the online-connection screen → look for `Offline mode: reported Unity services as ready.`
+- Join says the code is invalid → the room-code box patch or the stand-in code (`DIRECT`) didn't take.
+- Friends time out connecting → UPnP failed or the host is behind CGNAT; the log says which.
+- Host creates a lobby and nothing happens → `LobbyManager.CreateLobby` replacement (the original also did Unity Lobby work).
 
 ## Legal / etiquette
 
-This is an unofficial mod for a fan game. Don't redistribute the game itself or the developer's files; share only this plugin.
-Ask the developer (Brian_mpz, <https://gamejolt.com/games/fnaf-online/963459>) if you plan to run anything public.
+Unofficial mod for a fan game. It contains none of the game's files; players need the original from
+<https://gamejolt.com/games/fnaf-online/963459>. Ask the developer (Brian_mpz) before running anything public.

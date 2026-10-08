@@ -1,0 +1,26 @@
+using AsmResolver.DotNet;
+using Cpp2IL.Core;
+using Cpp2IL.Core.Api;
+using Cpp2IL.Core.OutputFormats;
+using Cpp2IL.Core.ProcessingLayers;
+using Il2CppInterop.Generator;
+using Il2CppInterop.Generator.Runners;
+using LibCpp2IL;
+using AssetRipper.Primitives;
+
+var ga = args[0]; var meta = args[1]; var outDir = args[2];
+LibCpp2IlBinaryRegistry.RegisterBuiltInBinarySupport();
+InstructionSetRegistry.RegisterInstructionSet<Cpp2IL.Core.InstructionSets.X86InstructionSet>(DefaultInstructionSets.X86_32);
+InstructionSetRegistry.RegisterInstructionSet<Cpp2IL.Core.InstructionSets.X86InstructionSet>(DefaultInstructionSets.X86_64);
+var unity = UnityVersion.Parse("6000.0.24f1");
+Cpp2IlApi.InitializeLibCpp2Il(ga, meta, unity, false);
+var layers = new List<Cpp2IlProcessingLayer> { new AttributeInjectorProcessingLayer() };
+foreach (var l in layers) l.PreProcess(Cpp2IlApi.CurrentAppContext, layers);
+foreach (var l in layers) l.Process(Cpp2IlApi.CurrentAppContext);
+var asms = new AsmResolverDllOutputFormatDefault().BuildAssemblies(Cpp2IlApi.CurrentAppContext);
+LibCpp2IlMain.Reset(); Cpp2IlApi.CurrentAppContext = null;
+Console.WriteLine($"cpp2il done: {asms.Count} assemblies");
+Directory.CreateDirectory(outDir);
+var opts = new GeneratorOptions { GameAssemblyPath = null, Source = asms, OutputDir = outDir, UnityBaseLibsDir = args.Length>3 ? args[3] : null };
+Il2CppInteropGenerator.Create(opts).AddInteropAssemblyGenerator().Run();
+Console.WriteLine("interop done");
