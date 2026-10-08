@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Net;
 using BepInEx;
 using BepInEx.Configuration;
@@ -30,7 +31,7 @@ namespace FnafSelfHost
     ///  * The room-code box also accepts a plain IP / host name (optionally ":port").
     ///  * Optionally switches off every Unity online service so the game works while the developer's servers are down.
     /// </summary>
-    [BepInPlugin("local.fnafonline.selfhost", "FNAF Online Self-Host", "0.3.1")]
+    [BepInPlugin("local.fnafonline.selfhost", "FNAF Online Self-Host", "0.4.0")]
     public class Plugin : BasePlugin
     {
         internal static ManualLogSource Log;
@@ -39,6 +40,9 @@ namespace FnafSelfHost
         internal static ConfigEntry<string> PublicAddress;
         internal static ConfigEntry<bool> TryUpnp;
         internal static ConfigEntry<bool> OfflineServices;
+        internal static ConfigEntry<string> ConnectionMode;
+        internal static ConfigEntry<string> CustomBroker;
+        internal static ConfigEntry<bool> CustomBrokerTls;
 
         public override void Load()
         {
@@ -48,11 +52,29 @@ namespace FnafSelfHost
             PublicAddress = Config.Bind("Host", "PublicAddress", "",
                 "Leave EMPTY to detect it automatically. Only set this if you host through a VPN or tunnel " +
                 "(e.g. your Tailscale IP, or a playit.gg address like name.joinmc.link:12345).");
+            ConnectionMode = Config.Bind("Host", "ConnectionMode", "Auto",
+                "How friends reach you. Auto = direct if your router opens the port automatically, otherwise the built-in relay " +
+                "(works behind carrier NAT / without any router setup, needs no installs). Direct = always direct. Relay = always relay.");
+            CustomBroker = Config.Bind("Relay", "CustomBroker", "",
+                "Leave empty to use the free public MQTT brokers. To use your own broker enter host:port (everyone must set the same).");
+            CustomBrokerTls = Config.Bind("Relay", "CustomBrokerTls", false, "Use TLS for CustomBroker.");
             TryUpnp = Config.Bind("Host", "TryUpnp", true,
                 "Automatically open the port on your router with UPnP when you host.");
             OfflineServices = Config.Bind("General", "OfflineServices", true,
                 "Skip every Unity online service (login, cloud code, lobby list, voice chat). Fixes the 'no online connection' " +
                 "screen when the developer's servers are down. Voice chat does not work in this mode.");
+
+            RelayLog.Info = m => Log.LogInfo(m);
+            RelayLog.Warn = m => Log.LogWarning(m);
+            var cb = CustomBroker.Value?.Trim();
+            if (!string.IsNullOrEmpty(cb))
+            {
+                var parts = cb.Split(':');
+                RelayBrokers.CustomHost = parts[0];
+                RelayBrokers.CustomPort = parts.Length > 1 && int.TryParse(parts[1], out var bp) ? bp : 1883;
+                RelayBrokers.CustomTls = CustomBrokerTls.Value;
+            }
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => { Relays.Shutdown(); };
 
             ClassInjector.RegisterTypeInIl2Cpp<ServicesKicker>();
             var harmony = new Harmony("local.fnafonline.selfhost");
@@ -89,10 +111,26 @@ namespace FnafSelfHost
 
             if (address == null)
             {
-                var r = HostNetwork.WaitForResult(listenPort, TryUpnp.Value, 9000);
+                var mode = (ConnectionMode.Value ?? "Auto").Trim();
+                bool relayOnly = mode.Equals("Relay", StringComparison.OrdinalIgnoreCase);
+                HostNetwork.Result r = null;
+                bool direct = false;
+                if (!relayOnly)
+                {
+                    r = HostNetwork.WaitForResult(listenPort, TryUpnp.Value, 9000);
+                    direct = mode.Equals("Direct", StringComparison.OrdinalIgnoreCase) || (r.PortOpened && r.Problem == null);
+                    Log.LogInfo($"Detected address {r.PublicIp} (LAN {r.LanIp}, port opened automatically: {r.PortOpened}).");
+                    if (r.Problem != null) Log.LogWarning(r.Problem);
+                }
+
+                if (!direct)
+                {
+                    var relayCode = Relays.StartHost(listenPort);
+                    if (relayCode != null) return relayCode;
+                    Log.LogWarning("The relay could not be started (no route to a broker?); falling back to a direct room code.");
+                    if (r == null) r = HostNetwork.WaitForResult(listenPort, TryUpnp.Value, 9000);
+                }
                 address = r.PublicIp ?? r.LanIp ?? "127.0.0.1";
-                Log.LogInfo($"Detected address {address} (LAN {r.LanIp}, port opened automatically: {r.PortOpened}).");
-                if (r.Problem != null) Log.LogWarning(r.Problem);
             }
 
             var code = AddressCode.Encode(IPAddress.Parse(address), port);
@@ -116,7 +154,18 @@ namespace FnafSelfHost
         private static void JoinOnlineRoom_Prefix(ref string joinCode)
         {
             if (!Plugin.Enabled.Value) return;
-            if (AddressCode.TryResolve(joinCode, Plugin.Port.Value, out var host, out var port))
+            if (RelayRoom.TryParse(joinCode, out var room))
+            {
+                var local = Relays.StartClient(room);
+                if (local != 0)
+                {
+                    Plugin.Log.LogInfo($"Joining relay room {room.Code} through local port {local}");
+                    _pendingHost = "127.0.0.1"; _pendingPort = (ushort)local;
+                    joinCode = StandIn;
+                }
+                else _pendingHost = null; // couldn't reach the broker: let the game report the failed join
+            }
+            else if (AddressCode.TryResolve(joinCode, Plugin.Port.Value, out var host, out var port))
             {
                 Plugin.Log.LogInfo($"Joining '{joinCode}' -> {host}:{port}");
                 _pendingHost = host; _pendingPort = port;
@@ -157,7 +206,60 @@ namespace FnafSelfHost
             }
             catch (Exception e) { Plugin.Log.LogWarning($"Couldn't relax the room-code box: {e.Message}"); }
 
-            HostNetwork.Begin(Plugin.Port.Value, Plugin.TryUpnp.Value);
+            if (!Plugin.ConnectionMode.Value.Trim().Equals("Relay", StringComparison.OrdinalIgnoreCase))
+                HostNetwork.Begin(Plugin.Port.Value, Plugin.TryUpnp.Value);
+        }
+    }
+
+    /// <summary>Owns the one active relay (host side or client side) for this session.</summary>
+    internal static class Relays
+    {
+        private static RelayHost _host;
+        private static RelayClient _client;
+
+        /// <summary>Starts relaying for the room we are hosting; returns the room code, or null if no broker could be reached.</summary>
+        public static string StartHost(ushort gamePort)
+        {
+            Shutdown();
+            var candidates = RelayBrokers.IsValid(RelayBrokers.CustomIndex)
+                ? new[] { RelayBrokers.CustomIndex }
+                : Enumerable.Range(0, RelayBrokers.Public.Length).ToArray();
+            // Try every broker at the same time (a blocked one must not stall the game) and use the most preferred that answers.
+            var hosts = candidates.Select(i => new RelayHost(RelayRoom.Create(i), gamePort)).ToArray();
+            var tasks = hosts.Select(h => System.Threading.Tasks.Task.Run(() => h.Start(5000))).ToArray();
+            System.Threading.Tasks.Task.WaitAll(tasks);
+            for (int k = 0; k < hosts.Length; k++)
+            {
+                var (bh, bp, btls) = RelayBrokers.Get(hosts[k].Room.BrokerIndex);
+                if (!tasks[k].Result) { Plugin.Log.LogWarning($"Relay: {bh}:{bp} is not reachable from this PC."); continue; }
+                _host = hosts[k];
+                for (int j = 0; j < hosts.Length; j++) if (j != k) hosts[j].Dispose();
+                Plugin.Log.LogInfo($"Relay ready via {bh}:{bp}{(btls ? " (TLS)" : "")}: friends can join with {_host.Room.Code} - no router setup needed.");
+                return _host.Room.Code;
+            }
+            return null;
+        }
+
+        /// <summary>Starts the local end of a relay room; returns the local UDP port the game should connect to, or 0.</summary>
+        public static int StartClient(RelayRoom room)
+        {
+            _client?.Dispose(); _client = null;
+            var (h, p, _) = RelayBrokers.Get(room.BrokerIndex);
+            var c = new RelayClient(room);
+            if (!c.Start(8000))
+            {
+                Plugin.Log.LogError($"Relay: couldn't reach {h}:{p}. The host picked this broker; if your network blocks it, ask them to set Host.ConnectionMode / a CustomBroker you both can reach.");
+                return 0;
+            }
+            _client = c;
+            return c.LocalPort;
+        }
+
+        public static void Shutdown()
+        {
+            try { _host?.Dispose(); } catch { }
+            try { _client?.Dispose(); } catch { }
+            _host = null; _client = null;
         }
     }
 

@@ -17,20 +17,28 @@ HOW TO TELL IT'S WORKING
 
 HOST  (no setup)
   - Go to the online menu and create a lobby like normal.
-  - The mod finds your public IP, opens the port on your router (UPnP), and copies your room code to the
-    clipboard. The code looks like  6B01R-GJ7K1  and also shows in the lobby.
-  - Send that code to your friends.
+  - The mod works out the best way for friends to reach you and puts the room code on your clipboard:
+      * If your router lets the mod open the port automatically, the code looks like  6B01R-GJ7K1  (direct, fastest).
+      * Otherwise (carrier/shared internet, no router access, strict firewall) it switches to the built-in RELAY
+        and the code looks like  RELAY-K3F9A-7QZ2M.  Nothing to set up, nothing for your friends to install.
+  - Send the code to your friends.
 
 JOIN
   - Paste the room code into the room code box and join. You can also type an IP address
     (for example 203.0.113.9) or  ip:port  instead.
 
+HOW THE RELAY WORKS
+  Everyone's PC connects OUT to a free public message server (the same kind chat apps use) and the game's packets
+  travel through it, end-to-end encrypted with a key that only exists inside your room code - the server can't read
+  or change them. Only outgoing connections are used, so it works behind carrier NAT. It adds some delay (usually
+  50-200 ms) and depends on those free servers being up. The mod tries several at once.
+
 NOTES
   - Everybody needs the same game version and this mod.
   - Voice chat does not work (it needs the developer's servers). Use Discord.
-  - If your router doesn't support UPnP, or your internet provider shares your address (CGNAT), friends can't
-    reach you directly. Fix: use Tailscale/ZeroTier/playit.gg, then in
-    BepInEx\config\local.fnafonline.selfhost.cfg  set  PublicAddress = <that address>
+  - Want the lowest delay? Use a direct connection: forward UDP 7777 on your router, or use Tailscale/ZeroTier/playit.gg
+    and set  PublicAddress  in BepInEx\config\local.fnafonline.selfhost.cfg  (then ConnectionMode can stay Auto).
+  - If the relay can't connect, your network may block it. Ask your friend to try, or use one of the direct options above.
   - Problems? Send the file  BepInEx\LogOutput.log
 
 This mod contains none of the game's files. BepInEx is LGPL-2.1: https://github.com/BepInEx/BepInEx
