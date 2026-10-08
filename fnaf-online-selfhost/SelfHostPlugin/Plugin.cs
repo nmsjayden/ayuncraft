@@ -9,6 +9,11 @@ using Il2CppInterop.Runtime.Injection;
 using TMPro;
 using Unity.Netcode;
 using Unity.Netcode.Transports.UTP;
+using Unity.Networking.Transport.Relay;
+using Unity.Services.Relay;
+using Unity.Services.Relay.Models;
+using Il2CppInterop.Runtime.InteropTypes.Arrays;
+using Il2CppList = Il2CppSystem.Collections.Generic.List<Unity.Services.Relay.Models.RelayServerEndpoint>;
 using Unity.Services.Authentication;
 using Unity.Services.Core;
 using UnityEngine;
@@ -24,7 +29,7 @@ namespace FnafSelfHost
     ///  * The room-code box also accepts a plain IP / host name (optionally ":port").
     ///  * Optionally switches off every Unity online service so the game works while the developer's servers are down.
     /// </summary>
-    [BepInPlugin("local.fnafonline.selfhost", "FNAF Online Self-Host", "0.2.1")]
+    [BepInPlugin("local.fnafonline.selfhost", "FNAF Online Self-Host", "0.3.0")]
     public class Plugin : BasePlugin
     {
         internal static ManualLogSource Log;
@@ -51,6 +56,7 @@ namespace FnafSelfHost
             ClassInjector.RegisterTypeInIl2Cpp<ServicesKicker>();
             var harmony = new Harmony("local.fnafonline.selfhost");
             harmony.PatchAll(typeof(Patches));
+            harmony.PatchAll(typeof(RelayPatches));
             if (OfflineServices.Value) harmony.PatchAll(typeof(OfflinePatches));
             Log.LogInfo($"Self-host mod loaded (direct={Enabled.Value}, offline services={OfflineServices.Value}, port={Port.Value}).");
         }
@@ -99,37 +105,8 @@ namespace FnafSelfHost
         // The game insists on a 6-character code before it even tries to join. We hand it this stand-in
         // and remember the real destination ourselves.
         private const string StandIn = "DIRECT";
-        private static string _pendingHost;
-        private static ushort _pendingPort;
-
-        // ---- HOST --------------------------------------------------------------------------------------------------
-        // Original: allocate a Relay, SetRelayServerData, NetworkManager.StartHost.
-        [HarmonyPatch(typeof(RelayManager), nameof(RelayManager.CreateRelayAsync))]
-        [HarmonyPrefix]
-        private static bool CreateRelayAsync_Prefix(RelayManager __instance, ref Il2Task __result)
-        {
-            if (!Plugin.Enabled.Value) return true;
-            try
-            {
-                var nm = NetworkManager.Singleton;
-                var utp = nm.GetComponent<UnityTransport>();
-                var port = Plugin.Port.Value;
-                utp.SetConnectionData("127.0.0.1", port, "0.0.0.0"); // listen on every interface
-
-                var code = Plugin.BuildHostCode(port);
-                __instance.joinCode = code;
-                try { GUIUtility.systemCopyBuffer = code; } catch { /* clipboard unavailable */ }
-
-                if (!nm.StartHost()) Plugin.Log.LogError("NetworkManager.StartHost() returned false");
-                __result = Il2Task.CompletedTask;
-            }
-            catch (Exception e)
-            {
-                Plugin.Log.LogError($"Hosting failed: {e}");
-                return true;
-            }
-            return false;
-        }
+        internal static string _pendingHost;
+        internal static ushort _pendingPort;
 
         // ---- JOIN --------------------------------------------------------------------------------------------------
         // Runs first: decode whatever was typed (room code / IP / host name) and swap in a code the game accepts.
@@ -149,42 +126,6 @@ namespace FnafSelfHost
                 Plugin.Log.LogWarning($"'{joinCode}' isn't a room code or an address; the game will report it as invalid.");
                 _pendingHost = null;
             }
-        }
-
-        // Original: join the Relay allocation, SetRelayServerData, build connection payload, StartClient.
-        [HarmonyPatch(typeof(RelayManager), nameof(RelayManager.JoinRelayAsync))]
-        [HarmonyPrefix]
-        private static bool JoinRelayAsync_Prefix(string codeToJoin, ref Il2Task __result)
-        {
-            if (!Plugin.Enabled.Value || _pendingHost == null) return true;
-            try
-            {
-                var nm = NetworkManager.Singleton;
-                var utp = nm.GetComponent<UnityTransport>();
-                var ip = AddressCode.ToIPv4(_pendingHost);
-                utp.SetConnectionData(ip, _pendingPort);
-
-                // Same payload the original builds: version + player name + auth player id.
-                var payload = new ConnectionPayload
-                {
-                    version = Application.version,
-                    playerName = MultiplayerManager.Instance.playerName,
-                    String2 = Plugin.OfflineServices.Value ? OfflinePatches.LocalPlayerId() : (AuthenticationService.Instance.PlayerId ?? OfflinePatches.LocalPlayerId()),
-                };
-                nm.NetworkConfig.ConnectionData = System.Text.Encoding.UTF8.GetBytes(JsonUtility.ToJson(payload));
-
-                Plugin.Log.LogInfo($"Connecting to {ip}:{_pendingPort} ...");
-                _pendingHost = null;
-                if (!nm.StartClient()) Plugin.Log.LogError("NetworkManager.StartClient() returned false");
-                __result = Il2Task.CompletedTask;
-            }
-            catch (Exception e)
-            {
-                Plugin.Log.LogError($"Join failed: {e}");
-                _pendingHost = null;
-                return true;
-            }
-            return false;
         }
 
         // The game also requires the displayed code to be exactly 6 characters long. Ours is longer.
@@ -216,6 +157,109 @@ namespace FnafSelfHost
             catch (Exception e) { Plugin.Log.LogWarning($"Couldn't relax the room-code box: {e.Message}"); }
 
             HostNetwork.Begin(Plugin.Port.Value, Plugin.TryUpnp.Value);
+        }
+    }
+
+    /// <summary>
+    /// The game's host/join code calls Unity's Relay service three times (create allocation, get join code, join allocation)
+    /// and feeds the answers to UnityTransport.SetRelayServerData. The game compiles its relay helpers straight into the
+    /// callers, so we can't replace them - instead we answer those three calls ourselves with harmless placeholder data and
+    /// redirect SetRelayServerData to a direct connection. Everything else the game does (connection payload, StartHost,
+    /// StartClient, lobby scene, ...) then runs untouched.
+    /// </summary>
+    internal static class RelayPatches
+    {
+        private enum Mode { None, Host, Client }
+        private static Mode _mode;
+        private static string _hostCode;
+
+        private static Il2CppStructArray<byte> Bytes(int n)
+        {
+            var a = new Il2CppStructArray<byte>(n);
+            for (int i = 0; i < n; i++) a[i] = (byte)(i + 1);
+            return a;
+        }
+
+        private static Il2CppList Endpoints(string host, int port)
+        {
+            var l = new Il2CppList();
+            // The game asks for one of these connection types; offer all so whichever it uses is found.
+            foreach (var t in new[] { "dtls", "udp", "wss", "ws" })
+                l.Add(new RelayServerEndpoint(t, RelayServerEndpoint.NetworkOptions.Udp, true, t == "dtls" || t == "wss", host, port));
+            return l;
+        }
+
+        // ---- HOST ----
+        [HarmonyPatch(typeof(WrappedRelayService), nameof(WrappedRelayService.CreateAllocationAsync))]
+        [HarmonyPrefix]
+        private static bool CreateAllocation(ref Il2CppSystem.Threading.Tasks.Task<Allocation> __result)
+        {
+            if (!Plugin.Enabled.Value) return true;
+            try
+            {
+                var port = Plugin.Port.Value;
+                _hostCode = Plugin.BuildHostCode(port); // finds the public IP + opens the port; the code is just that address
+                _mode = Mode.Host;
+                var alloc = new Allocation(Il2CppSystem.Guid.NewGuid(), Endpoints("127.0.0.1", port),
+                    new RelayServer("127.0.0.1", port), Bytes(64), Bytes(255), Bytes(16), "local");
+                __result = Il2Task.FromResult<Allocation>(alloc);
+                return false;
+            }
+            catch (Exception e) { Plugin.Log.LogError($"Fake CreateAllocation failed: {e}"); return true; }
+        }
+
+        [HarmonyPatch(typeof(WrappedRelayService), nameof(WrappedRelayService.GetJoinCodeAsync))]
+        [HarmonyPrefix]
+        private static bool GetJoinCode(ref Il2CppSystem.Threading.Tasks.Task<string> __result)
+        {
+            if (!Plugin.Enabled.Value || _mode != Mode.Host || _hostCode == null) return true;
+            try { GUIUtility.systemCopyBuffer = _hostCode; } catch { /* clipboard unavailable */ }
+            Plugin.Log.LogInfo($"Your room code is {_hostCode} (copied to the clipboard).");
+            __result = Il2Task.FromResult<string>(_hostCode);
+            return false;
+        }
+
+        // ---- JOIN ----
+        [HarmonyPatch(typeof(WrappedRelayService), nameof(WrappedRelayService.JoinAllocationAsync))]
+        [HarmonyPrefix]
+        private static bool JoinAllocation(ref Il2CppSystem.Threading.Tasks.Task<JoinAllocation> __result)
+        {
+            if (!Plugin.Enabled.Value || Patches._pendingHost == null) return true;
+            try
+            {
+                var alloc = new JoinAllocation(Il2CppSystem.Guid.NewGuid(), Endpoints("127.0.0.1", Patches._pendingPort),
+                    new RelayServer("127.0.0.1", Patches._pendingPort), Bytes(64), Bytes(255), Bytes(16), "local", Bytes(255));
+                _mode = Mode.Client;
+                __result = Il2Task.FromResult<JoinAllocation>(alloc);
+                return false;
+            }
+            catch (Exception e) { Plugin.Log.LogError($"Fake JoinAllocation failed: {e}"); return true; }
+        }
+
+        // ---- the actual redirect ----
+        [HarmonyPatch(typeof(UnityTransport), nameof(UnityTransport.SetRelayServerData), new[] { typeof(RelayServerData) })]
+        [HarmonyPrefix]
+        private static bool SetRelayServerData(UnityTransport __instance)
+        {
+            if (!Plugin.Enabled.Value || _mode == Mode.None) return true;
+            try
+            {
+                if (_mode == Mode.Host)
+                {
+                    __instance.SetConnectionData("127.0.0.1", Plugin.Port.Value, "0.0.0.0"); // listen on every interface
+                    Plugin.Log.LogInfo($"Hosting directly: listening on UDP {Plugin.Port.Value}.");
+                }
+                else
+                {
+                    var ip = AddressCode.ToIPv4(Patches._pendingHost);
+                    __instance.SetConnectionData(ip, Patches._pendingPort);
+                    Plugin.Log.LogInfo($"Connecting directly to {ip}:{Patches._pendingPort} ...");
+                    Patches._pendingHost = null;
+                }
+                _mode = Mode.None;
+                return false;
+            }
+            catch (Exception e) { Plugin.Log.LogError($"Direct transport setup failed: {e}"); _mode = Mode.None; return true; }
         }
     }
 
